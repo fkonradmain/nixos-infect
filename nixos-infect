@@ -38,6 +38,7 @@ fi
 nix_channel="${NIX_CHANNEL:-nixos-24.11}"
 # NIXOS_CONFIG cannot be handled up here because it is needed by several commands further down
 # TODO: make NIXOS_CONFIG handleable
+swap_size=${SWAP_SIZE:-2048}
 no_reboot="${NO_REBOOT:+true}"
 
 autodetectProvider() {
@@ -241,7 +242,7 @@ checkExistingSwap() {
 
 makeSwap() {
   swapFile=$(mktemp /tmp/nixos-infect.XXXXX.swp)
-  dd if=/dev/zero "of=$swapFile" bs=1M count=$((1*1024))
+  dd if=/dev/zero "of=$swapFile" bs=1M "count=$swap_size"
   chmod 0600 "$swapFile"
   mkswap "$swapFile"
   swapon -v "$swapFile"
@@ -376,6 +377,8 @@ infect() {
 
   nix-channel --remove nixpkgs
   nix-channel --add "https://nixos.org/channels/$nix_channel" nixos
+  # TODO: optionally add nix-unstable channel
+  # https://channels.nixos.org/nixos-unstable nixos-unstable
   nix-channel --update
 
   if [[ $NIXOS_CONFIG = http* ]]
