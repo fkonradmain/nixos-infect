@@ -7,17 +7,14 @@ set -ex -o pipefail
 provider="${PROVIDER:-autodetect}"
 nixos_import="${NIXOS_IMPORT:-}"
 ssh_authorized_keys_path="${SSH_AUTHORIZED_KEYS_PATH:-/tmp/authorized_keys}"
+
+# Zramswap
 zramswap=${ZRAM_SWAP_ENABLED:-true}
 if [[ "$zramswap" != "true" && "$zramswap" != "false" ]]; then
   echo "Error: ZRAM_SWAP_ENABLED must be either 'true' or 'false'."
   exit 1
 fi
-nixos_state_version=${NIXOS_STATE_VERSION:-24.11}
-nix_install_url="${NIX_INSTALL_URL:-'https://nixos.org/nix/install'}"
-nix_channel="${NIX_CHANNEL:-nixos-24.11}"
-# NIXOS_CONFIG cannot be handled up here because it is needed by several commands further down
-# TODO: make NIXOS_CONFIG handleable
-no_reboot="${NO_REBOOT:+true}"
+
 # Hostname and domain assignment
 if [[ -n "$NIXOS_HOSTNAME" ]]; then
   nixos_hostname="$NIXOS_HOSTNAME"
@@ -29,6 +26,19 @@ if [[ -n "$NIXOS_DOMAIN" ]]; then
 else
   nixos_domain="$(hostname -d)"
 fi
+
+nixos_state_version=${NIXOS_STATE_VERSION:-24.11}
+
+if [[ -n "$NIX_INSTALL_URL" ]]; then
+  nix_install_url="$NIX_INSTALL_URL"
+else
+  nix_install_url="https://nixos.org/nix/install"
+fi
+
+nix_channel="${NIX_CHANNEL:-nixos-24.11}"
+# NIXOS_CONFIG cannot be handled up here because it is needed by several commands further down
+# TODO: make NIXOS_CONFIG handleable
+no_reboot="${NO_REBOOT:+true}"
 
 autodetectProvider() {
   if [ -e /etc/hetzner-build ]; then
