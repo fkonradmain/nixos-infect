@@ -18,6 +18,17 @@ nix_channel="${NIX_CHANNEL:-nixos-24.11}"
 # NIXOS_CONFIG cannot be handled up here because it is needed by several commands further down
 # TODO: make NIXOS_CONFIG handleable
 no_reboot="${NO_REBOOT:+true}"
+# Hostname and domain assignment
+if [[ -n "$NIXOS_HOSTNAME" ]]; then
+  nixos_hostname="$NIXOS_HOSTNAME"
+else
+  nixos_hostname="$(hostname -s)"
+fi
+if [[ -n "$NIXOS_DOMAIN" ]]; then
+  nixos_domain="$NIXOS_DOMAIN"
+else
+  nixos_domain="$(hostname -d)"
+fi
 
 autodetectProvider() {
   if [ -e /etc/hetzner-build ]; then
@@ -67,8 +78,8 @@ makeConf() {
 
   boot.tmp.cleanOnBoot = true;
   zramSwap.enable = ${zramswap};
-  networking.hostName = "$(hostname -s)";
-  networking.domain = "$(hostname -d)";
+  networking.hostName = "${nixos_hostname}";
+  networking.domain = "${nixos_domain}";
   services.openssh.enable = true;
   users.users.root.openssh.authorizedKeys.keys = [$(while read -r line; do
     line=$(echo -n "$line" | sed 's/\r//g')
