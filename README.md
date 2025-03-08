@@ -69,6 +69,7 @@ and so it is advised to run with `bash -x`.
 
 This script supports several environment variables.
 TODO: Allow setting these variables as command line arguments
+TODO: Sync this documentation with the latest changes, e.g. nix flake support
 
 | environment variable        | description                                                                                                                                                                              | possible values                                                                                                                                                                                        | default value                   |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- |
