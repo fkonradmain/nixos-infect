@@ -437,7 +437,7 @@ infect() {
   export NIXOS_CONFIG="${NIXOS_CONFIG:-/etc/nixos/configuration.nix}"
 
   if [ "$enable_nix_flakes" = "true" ]; then
-    sudo nix build /etc/nixos#nixosConfigurations."${nixos_hostname}".config.system.build.toplevel \
+    nix build /etc/nixos#nixosConfigurations."${nixos_hostname}".config.system.build.toplevel \
     --extra-experimental-features 'nix-command flakes' \
     --profile /nix/var/nix/profiles/system
   else
