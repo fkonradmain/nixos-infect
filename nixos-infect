@@ -29,6 +29,12 @@ fi
 
 nixos_state_version=${NIXOS_STATE_VERSION:-24.11}
 
+enable_nix_flakes=${ENABLE_NIX_FLAKES:-true}
+if [[ "$enable_nix_flakes" != "true" && "$enable_nix_flakes" != "false" ]]; then
+  echo "Error: ENABLE_NIX_FLAKES must be either 'true' or 'false'."
+  exit 1
+fi
+
 if [[ -n "$NIX_INSTALL_URL" ]]; then
   nix_install_url="$NIX_INSTALL_URL"
 else
@@ -51,6 +57,7 @@ autodetectProvider() {
 
 makeConf() {
   # Skip everything if main config already present
+  # TODO: also add the possibility to skip if flake.nix is already present
   [[ -e /etc/nixos/configuration.nix ]] && return 0
 
   # Lightsail config is not like the others
@@ -100,6 +107,41 @@ makeConf() {
   system.stateVersion = "$nixos_state_version";
 }
 EOF
+
+  # Adding the nixos flake
+  # TODO: add flake support for arm as well i.e. add an architecutre selector
+  if [ "$enable_nix_flakes" = "true" ] && ! isX86_64; then
+    echo "Currently, flakes are only supported with x86 systems"
+    exit 1;
+  fi
+
+  if [ "$enable_nix_flakes" = "true" ] && isX86_64; then
+    cat > /etc/nixos/flake.nix << EOF
+# This is a minimal flake that only wraps around configuration.nix - this already saves us from using nix channels though
+{
+  description = "nixos-infect flake for ${nixos_hostname}";
+
+  inputs = {
+    # Official NixOS package source, using nixos's unstable branch by default
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    # nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable-small";
+    nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs-stable.url = "github:nixos/nixpkgs/nixos-24.11";
+  };
+
+  outputs = { self, nixpkgs }: {
+    nixosConfigurations = {
+      ${nixos_hostname} = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          ./configuration.nix
+        ];
+      };
+    };
+  };
+}
+EOF
+  fi
 
   if isEFI; then
     bootcfg=$(cat << EOF
@@ -376,11 +418,16 @@ infect() {
   source ~/.nix-profile/etc/profile.d/nix.sh
 
   nix-channel --remove nixpkgs
-  nix-channel --add "https://nixos.org/channels/$nix_channel" nixos
-  # TODO: optionally add nix-unstable channel
-  # https://channels.nixos.org/nixos-unstable nixos-unstable
-  nix-channel --update
+  if [ "$enable_nix_flakes" == "true" ]; then
+    echo "Not running \"nix-channel --add\" and \"nix-channel --update\", because we are using flakes"
+  else
+    nix-channel --add "https://nixos.org/channels/$nix_channel" nixos
+    # TODO: optionally add nix-unstable channel
+    # https://channels.nixos.org/nixos-unstable nixos-unstable
+    nix-channel --update
+  fi
 
+  # TODO: make the http nixos_config pull also compatible with flakes
   if [[ $NIXOS_CONFIG = http* ]]
   then
     curl "$NIXOS_CONFIG" -o /etc/nixos/configuration.nix
@@ -389,17 +436,24 @@ infect() {
 
   export NIXOS_CONFIG="${NIXOS_CONFIG:-/etc/nixos/configuration.nix}"
 
-  nix-env --set \
-    -I nixpkgs="$(realpath $HOME/.nix-defexpr/channels/nixos)" \
-    -f '<nixpkgs/nixos>' \
-    -p /nix/var/nix/profiles/system \
-    -A system
+  if [ "$enable_nix_flakes" = "true" ]; then
+    sudo nix build /etc/nixos#nixosConfigurations."${nixos_hostname}".config.system.build.toplevel \
+    --extra-experimental-features 'nix-command flakes' \
+    --profile /nix/var/nix/profiles/system
+  else
+    nix-env --set \
+      -I nixpkgs="$(realpath $HOME/.nix-defexpr/channels/nixos)" \
+      -f '<nixpkgs/nixos>' \
+      -p /nix/var/nix/profiles/system \
+      -A system
+  fi
 
   # Remove nix installed with curl | bash
   rm -fv /nix/var/nix/profiles/default*
   /nix/var/nix/profiles/system/sw/bin/nix-collect-garbage
 
   # Reify resolv.conf
+  # TODO: add support for non static /etc/resolv.conf e.g. when using dhcp
   [[ -L /etc/resolv.conf ]] && mv -v /etc/resolv.conf /etc/resolv.conf.lnk && cat /etc/resolv.conf.lnk > /etc/resolv.conf
 
   # Set label of root partition
