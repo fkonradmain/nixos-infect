@@ -27,6 +27,8 @@ else
   nixos_domain="$(hostname -d)"
 fi
 
+nixos_ssh_port=${NIXOS_SSH_PORT:-22}
+
 nixos_state_version=${NIXOS_STATE_VERSION:-24.11}
 
 enable_nix_flakes=${ENABLE_NIX_FLAKES:-true}
@@ -99,6 +101,7 @@ makeConf() {
   networking.hostName = "${nixos_hostname}";
   networking.domain = "${nixos_domain}";
   services.openssh.enable = true;
+  services.openssh.ports = [ ${nixos_ssh_port} ];
   users.users.root.openssh.authorizedKeys.keys = [$(while read -r line; do
     line=$(echo -n "$line" | sed 's/\r//g')
     trimmed_line=$(echo -n "$line" | xargs)
