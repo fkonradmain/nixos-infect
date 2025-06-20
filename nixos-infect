@@ -43,7 +43,7 @@ else
   nix_install_url="https://nixos.org/nix/install"
 fi
 
-nix_channel="${NIX_CHANNEL:-nixos-24.11}"
+nix_channel="${NIX_CHANNEL:-nixos-25.05}"
 # NIXOS_CONFIG cannot be handled up here because it is needed by several commands further down
 # TODO: make NIXOS_CONFIG handleable
 swap_size=${SWAP_SIZE:-2048}
