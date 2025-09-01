@@ -2,32 +2,87 @@
 
 # More info at: https://github.com/elitak/nixos-infect
 
-set -e -o pipefail
+set -ex -o pipefail
+
+provider="${PROVIDER:-autodetect}"
+nixos_import="${NIXOS_IMPORT:-}"
+ssh_authorized_keys_path="${SSH_AUTHORIZED_KEYS_PATH:-/tmp/authorized_keys}"
+
+# Zramswap
+zramswap=${ZRAM_SWAP_ENABLED:-true}
+if [[ "$zramswap" != "true" && "$zramswap" != "false" ]]; then
+  echo "Error: ZRAM_SWAP_ENABLED must be either 'true' or 'false'."
+  exit 1
+fi
+
+# Hostname and domain assignment
+if [[ -n "$NIXOS_HOSTNAME" ]]; then
+  nixos_hostname="$NIXOS_HOSTNAME"
+else
+  nixos_hostname="$(hostname -s)"
+fi
+if [[ -n "$NIXOS_DOMAIN" ]]; then
+  nixos_domain="$NIXOS_DOMAIN"
+else
+  nixos_domain="$(hostname -d)"
+fi
+
+nixos_ssh_port=${NIXOS_SSH_PORT:-22}
+
+nixos_state_version=${NIXOS_STATE_VERSION:-24.11}
+
+enable_nix_flakes=${ENABLE_NIX_FLAKES:-true}
+if [[ "$enable_nix_flakes" != "true" && "$enable_nix_flakes" != "false" ]]; then
+  echo "Error: ENABLE_NIX_FLAKES must be either 'true' or 'false'."
+  exit 1
+fi
+
+if [[ -n "$NIX_INSTALL_URL" ]]; then
+  nix_install_url="$NIX_INSTALL_URL"
+else
+  nix_install_url="https://nixos.org/nix/install"
+fi
+
+nix_channel="${NIX_CHANNEL:-nixos-25.05}"
+# NIXOS_CONFIG cannot be handled up here because it is needed by several commands further down
+# TODO: make NIXOS_CONFIG handleable
+swap_size=${SWAP_SIZE:-2048}
+no_reboot="${NO_REBOOT:+true}"
 
 autodetectProvider() {
   if [ -e /etc/hetzner-build ]; then
-    PROVIDER="hetznercloud"
+    provider="hetznercloud"
+  else
+    provider="generic"
   fi
 }
 
 makeConf() {
   # Skip everything if main config already present
+  # TODO: also add the possibility to skip if flake.nix is already present
   [[ -e /etc/nixos/configuration.nix ]] && return 0
 
   # Lightsail config is not like the others
-  if [ "$PROVIDER" = "lightsail" ]; then
+  if [ "$provider" = "lightsail" ]; then
     makeLightsailConf
     return 0
   fi
 
   # NB <<"EOF" quotes / $ ` in heredocs, <<EOF does not
   mkdir -p /etc/nixos
+
+  # Adding the possibility to download ssh keys from a remote address
+  if [[ $ssh_authorized_keys_path = http* ]]
+  then
+    curl "$ssh_authorized_keys_path" -o /tmp/authorized_keys
+    ssh_authorized_keys_path=/tmp/authorized_keys
+  fi
   # Prevent grep for sending error code 1 (and halting execution) when no lines are selected : https://www.unix.com/man-page/posix/1P/grep
   local IFS=$'\n'
-  for trypath in /root/.ssh/authorized_keys /home/$SUDO_USER/.ssh/authorized_keys $HOME/.ssh/authorized_keys; do
+  for trypath in /root/.ssh/authorized_keys /home/$SUDO_USER/.ssh/authorized_keys /home/$USER/.ssh/authorized_keys $HOME/.ssh/authorized_keys; do
       [[ -r "$trypath" ]] \
       && keys=$(sed -E 's/^[^#].*[[:space:]]((sk-ssh|sk-ecdsa|ssh|ecdsa)-[^[:space:]]+)[[:space:]]+([^[:space:]]+)([[:space:]]*.*)$/\1 \3\4/' "$trypath") \
-      && [[ ! -z "$keys" ]] \
+      && [[ -n "$keys" ]] \
       && break
   done
   local network_import=""
@@ -38,22 +93,58 @@ makeConf() {
   imports = [
     ./hardware-configuration.nix
     $network_import
-    $NIXOS_IMPORT
+    $nixos_import
   ];
 
   boot.tmp.cleanOnBoot = true;
   zramSwap.enable = ${zramswap};
-  networking.hostName = "$(hostname -s)";
-  networking.domain = "$(hostname -d)";
+  networking.hostName = "${nixos_hostname}";
+  networking.domain = "${nixos_domain}";
   services.openssh.enable = true;
+  services.openssh.ports = [ ${nixos_ssh_port} ];
   users.users.root.openssh.authorizedKeys.keys = [$(while read -r line; do
     line=$(echo -n "$line" | sed 's/\r//g')
     trimmed_line=$(echo -n "$line" | xargs)
     echo -n "''$trimmed_line'' "
   done <<< "$keys")];
-  system.stateVersion = "23.11";
+  system.stateVersion = "$nixos_state_version";
 }
 EOF
+
+  # Adding the nixos flake
+  # TODO: add flake support for arm as well i.e. add an architecutre selector
+  if [ "$enable_nix_flakes" = "true" ] && ! isX86_64; then
+    echo "Currently, flakes are only supported with x86 systems"
+    exit 1;
+  fi
+
+  if [ "$enable_nix_flakes" = "true" ] && isX86_64; then
+    cat > /etc/nixos/flake.nix << EOF
+# This is a minimal flake that only wraps around configuration.nix - this already saves us from using nix channels though
+{
+  description = "nixos-infect flake for ${nixos_hostname}";
+
+  inputs = {
+    # Official NixOS package source, using nixos's unstable branch by default
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    # nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable-small";
+    # nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
+    # nixpkgs-stable.url = "github:nixos/nixpkgs/nixos-24.11";
+  };
+
+  outputs = { self, nixpkgs }: {
+    nixosConfigurations = {
+      ${nixos_hostname} = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          ./configuration.nix
+        ];
+      };
+    };
+  };
+}
+EOF
+  fi
 
   if isEFI; then
     bootcfg=$(cat << EOF
@@ -109,7 +200,7 @@ makeNetworkingConf() {
   local IFS=$'\n'
   eth0_name=$(ip address show | grep '^2:' | awk -F': ' '{print $2}')
   eth0_ip4s=$(ip address show dev "$eth0_name" | grep 'inet ' | sed -r 's|.*inet ([0-9.]+)/([0-9]+).*|{ address="\1"; prefixLength=\2; }|')
-  eth0_ip6s=$(ip address show dev "$eth0_name" | grep 'inet6 ' | sed -r 's|.*inet6 ([0-9a-f:]+)/([0-9]+).*|{ address="\1"; prefixLength=\2; }|' || '')
+  eth0_ip6s=$(ip address show dev "$eth0_name" | grep 'inet6 ' | sed -r 's|.*inet6 ([0-9a-f:]+)/([0-9]+).*|{ address="\1"; prefixLength=\2; }|' || 'true')
   gateway=$(ip route show dev "$eth0_name" | grep default | sed -r 's|default via ([0-9.]+).*|\1|')
   gateway6=$(ip -6 route show dev "$eth0_name" | grep default | sed -r 's|default via ([0-9a-f:]+).*|\1|' || true)
   ether0=$(ip address show dev "$eth0_name" | grep link/ether | sed -r 's|.*link/ether ([0-9a-f:]+) .*|\1|')
@@ -117,7 +208,7 @@ makeNetworkingConf() {
   eth1_name=$(ip address show | grep '^3:' | awk -F': ' '{print $2}')||true
   if [ -n "$eth1_name" ];then
     eth1_ip4s=$(ip address show dev "$eth1_name" | grep 'inet ' | sed -r 's|.*inet ([0-9.]+)/([0-9]+).*|{ address="\1"; prefixLength=\2; }|')
-    eth1_ip6s=$(ip address show dev "$eth1_name" | grep 'inet6 ' | sed -r 's|.*inet6 ([0-9a-f:]+)/([0-9]+).*|{ address="\1"; prefixLength=\2; }|' || '')
+    eth1_ip6s=$(ip address show dev "$eth1_name" | grep 'inet6 ' | sed -r 's|.*inet6 ([0-9a-f:]+)/([0-9]+).*|{ address="\1"; prefixLength=\2; }|' || 'true')
     ether1=$(ip address show dev "$eth1_name" | grep link/ether | sed -r 's|.*link/ether ([0-9a-f:]+) .*|\1|')
     interfaces1=$(cat << EOF
       $eth1_name = {
@@ -182,14 +273,13 @@ EOF
 }
 
 checkExistingSwap() {
-  SWAPSHOW=$(swapon --show --noheadings --raw)
-  zramswap=true
+  swapshow=$(swapon --show --noheadings --raw)
   swapcfg=""
-  if [[ -n "$SWAPSHOW" ]]; then
-    SWAP_DEVICE="${SWAPSHOW%% *}"
-    if [[ "$SWAP_DEVICE" == "/dev/"* ]]; then
+  if [[ -n "$swapshow" ]]; then
+    swap_device="${swapshow%% *}"
+    if [[ "$swap_device" == "/dev/"* ]]; then
       zramswap=false
-      swapcfg="swapDevices = [ { device = \"${SWAP_DEVICE}\"; } ];"
+      swapcfg="swapDevices = [ { device = \"${swap_device}\"; } ];"
       NO_SWAP=true
     fi
   fi
@@ -197,7 +287,7 @@ checkExistingSwap() {
 
 makeSwap() {
   swapFile=$(mktemp /tmp/nixos-infect.XXXXX.swp)
-  dd if=/dev/zero "of=$swapFile" bs=1M count=$((1*1024))
+  dd if=/dev/zero "of=$swapFile" bs=1M "count=$swap_size"
   chmod 0600 "$swapFile"
   mkswap "$swapFile"
   swapon -v "$swapFile"
@@ -226,7 +316,7 @@ findESP() {
   done
   [[ -z "$esp" ]] && { echo "ERROR: No ESP mount point found"; return 1; }
   for uuid in /dev/disk/by-uuid/*; do
-    [[ $(readlink -f "$uuid") == "$esp" ]] && echo $uuid && return 0
+    [[ $(readlink -f "$uuid") == "$esp" ]] && echo "$uuid" && return 0
   done
 }
 
@@ -241,7 +331,7 @@ prepareEnv() {
   # Retrieve root fs block device
   #                   (get root mount)  (get partition or logical volume)
   rootfsdev=$(mount | grep "on / type" | awk '{print $1;}')
-  rootfstype=$(df $rootfsdev --output=fstype | sed 1d)
+  rootfstype=$(df "$rootfsdev" --output=fstype | sed 1d)
 
   # DigitalOcean doesn't seem to set USER while running user data
   export USER="root"
@@ -325,36 +415,48 @@ infect() {
   # TODO use addgroup and adduser as fallbacks
   #addgroup nixbld -g 30000 || true
   #for i in {1..10}; do adduser -DH -G nixbld nixbld$i || true; done
-  NIX_INSTALL_URL="${NIX_INSTALL_URL:-https://nixos.org/nix/install}"
-  curl -L "${NIX_INSTALL_URL}" | sh -s -- --no-channel-add
+  curl -L "$nix_install_url" | sh -s -- --no-channel-add
 
   # shellcheck disable=SC1090
   source ~/.nix-profile/etc/profile.d/nix.sh
 
-  [[ -z "$NIX_CHANNEL" ]] && NIX_CHANNEL="nixos-23.05"
   nix-channel --remove nixpkgs
-  nix-channel --add "https://nixos.org/channels/$NIX_CHANNEL" nixos
-  nix-channel --update
+  if [ "$enable_nix_flakes" == "true" ]; then
+    echo "Not running \"nix-channel --add\" and \"nix-channel --update\", because we are using flakes"
+  else
+    nix-channel --add "https://nixos.org/channels/$nix_channel" nixos
+    # TODO: optionally add nix-unstable channel
+    # https://channels.nixos.org/nixos-unstable nixos-unstable
+    nix-channel --update
+  fi
 
+  # TODO: make the http nixos_config pull also compatible with flakes
   if [[ $NIXOS_CONFIG = http* ]]
   then
-    curl $NIXOS_CONFIG -o /etc/nixos/configuration.nix
+    curl "$NIXOS_CONFIG" -o /etc/nixos/configuration.nix
     unset NIXOS_CONFIG
   fi
 
   export NIXOS_CONFIG="${NIXOS_CONFIG:-/etc/nixos/configuration.nix}"
 
-  nix-env --set \
-    -I nixpkgs=$(realpath $HOME/.nix-defexpr/channels/nixos) \
-    -f '<nixpkgs/nixos>' \
-    -p /nix/var/nix/profiles/system \
-    -A system
+  if [ "$enable_nix_flakes" = "true" ]; then
+    nix build /etc/nixos#nixosConfigurations."${nixos_hostname}".config.system.build.toplevel \
+    --extra-experimental-features 'nix-command flakes' \
+    --profile /nix/var/nix/profiles/system
+  else
+    nix-env --set \
+      -I nixpkgs="$(realpath $HOME/.nix-defexpr/channels/nixos)" \
+      -f '<nixpkgs/nixos>' \
+      -p /nix/var/nix/profiles/system \
+      -A system
+  fi
 
   # Remove nix installed with curl | bash
   rm -fv /nix/var/nix/profiles/default*
   /nix/var/nix/profiles/system/sw/bin/nix-collect-garbage
 
   # Reify resolv.conf
+  # TODO: add support for non static /etc/resolv.conf e.g. when using dhcp
   [[ -L /etc/resolv.conf ]] && mv -v /etc/resolv.conf /etc/resolv.conf.lnk && cat /etc/resolv.conf.lnk > /etc/resolv.conf
 
   # Set label of root partition
@@ -373,6 +475,7 @@ infect() {
   rm -rf /boot.bak
   isEFI && umount "$esp"
 
+  # Triggers SC2115, not ignoring this warning, because it is a very dangerous command
   mv -v /boot /boot.bak || { cp -a /boot /boot.bak ; rm -rf /boot/* ; umount /boot ; }
   if isEFI; then
     mkdir -p /boot
@@ -382,13 +485,13 @@ infect() {
   /nix/var/nix/profiles/system/bin/switch-to-configuration boot
 }
 
-if [ ! -v PROVIDER ]; then
+if [ "$provider" == "autodetect" ]; then
   autodetectProvider
 fi
 
-[ "$PROVIDER" = "digitalocean" ] && doNetConf=y # digitalocean requires detailed network config to be generated
-[ "$PROVIDER" = "lightsail" ] && newrootfslabel="nixos"
-if [[ "$PROVIDER" = "digitalocean" ]] || [[ "$PROVIDER" = "servarica" ]] || [[ "$PROVIDER" = "hetznercloud" ]]; then
+[ "$provider" = "digitalocean" ] && doNetConf=y # digitalocean requires detailed network config to be generated
+[ "$provider" = "lightsail" ] && newrootfslabel="nixos"
+if [[ "$provider" = "digitalocean" ]] || [[ "$provider" = "servarica" ]] || [[ "$provider" = "hetznercloud" ]]; then
 	doNetConf=y # some providers require detailed network config to be generated
 fi
 
@@ -404,6 +507,6 @@ if [[ -z "$NO_SWAP" ]]; then
     removeSwap
 fi
 
-if [[ -z "$NO_REBOOT" ]]; then
+if [[ -z "$no_reboot" ]]; then
   reboot
 fi
